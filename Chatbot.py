@@ -1,29 +1,85 @@
-from openai import OpenAI
+# import openai
+# from openai import OpenAI
 import streamlit as st
+from streamlit_chat import message
+import requests
+import sseclient
+import json
+from shared import constants
+from tenacity import retry, wait_exponential
 
-with st.sidebar:
-    openai_api_key = st.text_input("OpenAI API Key", key="chatbot_api_key", type="password")
-    "[Get an OpenAI API key](https://platform.openai.com/account/api-keys)"
-    "[View the source code](https://github.com/streamlit/llm-examples/blob/main/Chatbot.py)"
-    "[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/streamlit/llm-examples?quickstart=1)"
+st.title("💬 Streamlit GPT")
 
-st.title("💬 Chatbot")
-st.caption("🚀 A streamlit chatbot powered by OpenAI LLM")
+# Initilize session states
+if "disabled" not in st.session_state:
+    st.session_state.disabled = False
+
+# Initialize chat history
 if "messages" not in st.session_state:
-    st.session_state["messages"] = [{"role": "assistant", "content": "How can I help you?"}]
+    st.session_state.messages = [{"role": "assistant", "content": "How can I help you?"}]
 
-for msg in st.session_state.messages:
-    st.chat_message(msg["role"]).write(msg["content"])
-
-if prompt := st.chat_input():
-    if not openai_api_key:
-        st.info("Please add your OpenAI API key to continue.")
-        st.stop()
-
-    client = OpenAI(api_key=openai_api_key)
+def toggle_submitted():
+    if st.session_state.disabled == False: st.session_state.disabled = True
+    else: st.session_state.disabled = False
+    
+@retry(wait=wait_exponential(multiplier=1, min=4, max=10))
+def chat_completion(message_placeholder, full_response):
+    try:
+        response = requests.post(
+        url="https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {constants.OPENROUTER_API_KEY}",
+            "HTTP-Referer": constants.OPENROUTER_REFERRER, # Optional, for including your app on openrouter.ai rankings.
+            "Accept": "text/event-stream",
+        },
+        data=json.dumps({
+            "model": "openai/gpt-3.5-turbo-1106", # Optional
+            "messages": [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages],
+            "stream": True,
+        }),
+        stream=True,
+        timeout=6 # 6 seconds
+    )
+        client = sseclient.SSEClient(response)
+        for event in client.events():
+            if event.data != '[DONE]':
+                print(f"Event: {event.data}")
+                print(json.loads(event.data)['choices'][0]['delta']['content'], end="", flush=True)
+                full_response += (json.loads(event.data)['choices'][0]['delta']['content'] or "")
+                message_placeholder.markdown(full_response + "▌")
+        message_placeholder.markdown(full_response)
+        st.session_state.messages.append({"role": "assistant", "content": full_response})
+        toggle_submitted()
+        st.rerun()
+        print(f"st.session_state.disabled: {st.session_state.disabled}")
+        print(f"this ran!")
+    except requests.exceptions.Timeout:
+        print('The request timed out')
+        print("Wait 2^x * 1 second between each retry starting with 4 seconds, then up to 10 seconds, then 10 seconds afterwards")
+        raise Exception
+    except requests.exceptions.RequestException as e:
+        print('An error occurred:', e)
+        print("Wait 2^x * 1 second between each retry starting with 4 seconds, then up to 10 seconds, then 10 seconds afterwards")
+        raise Exception
+    
+# Display chat messages from history on app rerun
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+        
+# Accept user input
+prompt = st.chat_input("What is up?", disabled=st.session_state.disabled, on_submit=toggle_submitted)
+if prompt:
+    # Add user message to chat history
+    print(f"st.session_state.disabled: {st.session_state.disabled}")
     st.session_state.messages.append({"role": "user", "content": prompt})
-    st.chat_message("user").write(prompt)
-    response = client.chat.completions.create(model="gpt-3.5-turbo", messages=st.session_state.messages)
-    msg = response.choices[0].message.content
-    st.session_state.messages.append({"role": "assistant", "content": msg})
-    st.chat_message("assistant").write(msg)
+    
+    # Display user message in chat message container
+    with st.chat_message("user"):
+        st.markdown(prompt)
+        
+    # Display assistant response in chat message container
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        full_response = ""
+        chat_completion(message_placeholder, full_response)
